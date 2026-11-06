@@ -35,6 +35,58 @@ const spritesMocks = vi.hoisted(() => ({
   deleteSprite: vi.fn(),
 }));
 
+const boxdMocks = vi.hoisted(() => {
+  class MockNotFoundError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "NotFoundError";
+    }
+  }
+
+  return {
+    MockNotFoundError,
+    clientOptions: vi.fn(),
+    create: vi.fn(),
+    get: vi.fn(),
+    delete: vi.fn(),
+    waitUntilReady: vi.fn(),
+    exec: vi.fn(),
+    start: vi.fn(),
+    resume: vi.fn(),
+    wake: vi.fn(),
+    hibernate: vi.fn(),
+    setBotProtection: vi.fn(),
+    setPort: vi.fn(),
+    fsMkdir: vi.fn(),
+    fsWrite: vi.fn(),
+    fsRead: vi.fn(),
+  };
+});
+
+vi.mock("@boxd-sh/sdk", () => ({
+  NotFoundError: boxdMocks.MockNotFoundError,
+  Boxd: class MockBoxd {
+    constructor(options?: unknown) {
+      boxdMocks.clientOptions(options);
+    }
+
+    machines = {
+      create: boxdMocks.create,
+      get: boxdMocks.get,
+      delete: boxdMocks.delete,
+      waitUntilReady: boxdMocks.waitUntilReady,
+      exec: boxdMocks.exec,
+      start: boxdMocks.start,
+      resume: boxdMocks.resume,
+      wake: boxdMocks.wake,
+      hibernate: boxdMocks.hibernate,
+      setBotProtection: boxdMocks.setBotProtection,
+      proxies: { setPort: boxdMocks.setPort },
+      fs: { mkdir: boxdMocks.fsMkdir, write: boxdMocks.fsWrite, read: boxdMocks.fsRead },
+    };
+  },
+}));
+
 vi.mock("@e2b/code-interpreter", () => ({
   NotFoundError: e2bMocks.MockNotFoundError,
   Sandbox: {
@@ -85,6 +137,7 @@ import { modal } from "../src/providers/modal.ts";
 import { computesdk } from "../src/providers/computesdk.ts";
 import { agentcomputer } from "../src/providers/agentcomputer.ts";
 import { sprites } from "../src/providers/sprites.ts";
+import { boxd } from "../src/providers/boxd.ts";
 
 function createFetch(): typeof fetch {
   return async () => new Response(null, { status: 200 });
@@ -148,6 +201,9 @@ beforeEach(() => {
   spritesMocks.createSprite.mockReset();
   spritesMocks.getSprite.mockReset();
   spritesMocks.deleteSprite.mockReset();
+  for (const mock of Object.values(boxdMocks)) {
+    if (typeof mock === "function" && "mockReset" in mock) mock.mockReset();
+  }
 });
 
 describe("SandboxAgent provider lifecycle", () => {
@@ -619,5 +675,128 @@ describe("sprites provider", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+});
+
+describe("boxd provider", () => {
+  function stubRunningMachine() {
+    boxdMocks.create.mockResolvedValue({ id: "vm-1", name: "sandbox-1" });
+    boxdMocks.waitUntilReady.mockResolvedValue({ id: "vm-1", status: "running" });
+    boxdMocks.exec.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0, success: true });
+  }
+
+  it("creates a machine, pins the proxy port, stores the token and env, installs, and starts a token-protected server", async () => {
+    stubRunningMachine();
+
+    const provider = boxd({
+      create: { name: "sandbox-1", labels: { team: "agents" }, deleteAfter: 3600 },
+      env: { ANTHROPIC_API_KEY: "test'value" },
+      token: "fixed-token",
+    });
+
+    await expect(provider.create()).resolves.toBe("vm-1");
+
+    expect(boxdMocks.create).toHaveBeenCalledWith({ name: "sandbox-1", labels: { team: "agents" }, deleteAfter: 3600 });
+    expect(boxdMocks.setPort).toHaveBeenCalledWith("vm-1", 3000);
+    expect(boxdMocks.setBotProtection).toHaveBeenCalledWith("vm-1", "off");
+    expect(boxdMocks.fsWrite).toHaveBeenCalledWith("vm-1", ".sandbox-agent-boxd/token", "fixed-token\n", { mode: 0o600 });
+    expect(boxdMocks.fsWrite).toHaveBeenCalledWith("vm-1", ".sandbox-agent-boxd/env", "export ANTHROPIC_API_KEY='test'\\''value'\n", { mode: 0o600 });
+
+    const commands = boxdMocks.exec.mock.calls.map(([, params]) => (params as { command: string[] }).command[2]);
+    expect(commands[0]).toContain("releases.rivet.dev/sandbox-agent/0.5.0-rc.2/install.sh");
+    expect(commands[0]).toContain("sandbox-agent install-agent 'claude'");
+    expect(commands[0]).toContain("sandbox-agent install-agent 'codex'");
+    expect(commands[1]).toContain("pkill -x sandbox-agent");
+    expect(commands[1]).toContain('sandbox-agent server --token "$(cat ./.sandbox-agent-boxd/token)" --host 0.0.0.0 --port 3000');
+    expect(commands.join("\n")).not.toContain("--no-token");
+    expect(commands.join("\n")).not.toContain("test'value");
+  });
+
+  it("generates a random token per machine when none is configured", async () => {
+    stubRunningMachine();
+    const provider = boxd({ installAgents: [] }) as SandboxProvider & { getToken(id: string): Promise<string> };
+
+    await provider.create();
+
+    const tokenWrite = boxdMocks.fsWrite.mock.calls.find(([, path]) => path === ".sandbox-agent-boxd/token");
+    const token = String(tokenWrite?.[2]).trim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    await expect(provider.getToken("vm-1")).resolves.toBe(token);
+    expect(boxdMocks.fsRead).not.toHaveBeenCalled();
+  });
+
+  it("reads the token back from the machine for a new provider instance", async () => {
+    boxdMocks.fsRead.mockResolvedValue(new TextEncoder().encode("stored-token\n"));
+    boxdMocks.get.mockResolvedValue({ id: "vm-1", access: { url: "https://sandbox-1.boxd.sh" } });
+    const provider = boxd() as SandboxProvider & { getToken(id: string): Promise<string> };
+
+    await expect(provider.getToken("vm-1")).resolves.toBe("stored-token");
+    await expect(provider.getUrl?.("vm-1")).resolves.toBe("https://sandbox-1.boxd.sh");
+    await expect(provider.getInspectorUrl?.("vm-1")).resolves.toBe("https://sandbox-1.boxd.sh/ui/?token=stored-token");
+  });
+
+  it("deletes the machine when setup fails after it was created", async () => {
+    stubRunningMachine();
+    boxdMocks.exec.mockResolvedValue({ stdout: "", stderr: "curl: (6) Could not resolve host", exitCode: 6, success: false });
+    const provider = boxd();
+
+    await expect(provider.create()).rejects.toThrow(/boxd command failed \(exit 6\)/);
+    expect(boxdMocks.delete).toHaveBeenCalledWith("vm-1");
+  });
+
+  it("wakes, resumes, or starts a sleeping machine on reconnect", async () => {
+    const provider = boxd();
+
+    boxdMocks.get.mockResolvedValueOnce({ id: "vm-1", status: "hibernated" });
+    await provider.reconnect?.("vm-1");
+    expect(boxdMocks.wake).toHaveBeenCalledWith("vm-1");
+
+    boxdMocks.get.mockResolvedValueOnce({ id: "vm-1", status: "suspended" });
+    await provider.reconnect?.("vm-1");
+    expect(boxdMocks.resume).toHaveBeenCalledWith("vm-1");
+
+    boxdMocks.get.mockResolvedValueOnce({ id: "vm-1", status: "stopped" });
+    await provider.reconnect?.("vm-1");
+    expect(boxdMocks.start).toHaveBeenCalledWith("vm-1");
+
+    boxdMocks.get.mockResolvedValueOnce({ id: "vm-1", status: "running" });
+    await provider.reconnect?.("vm-1");
+    expect(boxdMocks.waitUntilReady).toHaveBeenCalledTimes(4);
+  });
+
+  it("maps missing machines to SandboxDestroyedError", async () => {
+    boxdMocks.get.mockRejectedValue(new boxdMocks.MockNotFoundError("VM not found"));
+    const provider = boxd();
+
+    await expect(provider.reconnect?.("vm-missing")).rejects.toBeInstanceOf(SandboxDestroyedError);
+  });
+
+  it("hibernates on pause, deletes on destroy, and ignores machines that are already gone", async () => {
+    const provider = boxd({ clientOptions: { apiKey: "test-key" } });
+
+    await provider.pause?.("vm-1");
+    expect(boxdMocks.hibernate).toHaveBeenCalledWith("vm-1");
+
+    await provider.destroy("vm-1");
+    expect(boxdMocks.delete).toHaveBeenCalledWith("vm-1");
+
+    boxdMocks.delete.mockRejectedValueOnce(new boxdMocks.MockNotFoundError("VM not found"));
+    await expect(provider.kill?.("vm-1")).resolves.toBeUndefined();
+    expect(boxdMocks.clientOptions).toHaveBeenCalledTimes(1);
+    expect(boxdMocks.clientOptions).toHaveBeenCalledWith({ apiKey: "test-key" });
+  });
+
+  it("restarts the server from the stored token and env in ensureServer", async () => {
+    boxdMocks.exec.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0, success: true });
+    const provider = boxd({ agentPort: 8080 });
+
+    await provider.ensureServer?.("vm-1");
+
+    expect(boxdMocks.exec).toHaveBeenCalledTimes(1);
+    const command = (boxdMocks.exec.mock.calls[0]?.[1] as { command: string[] }).command;
+    expect(command.slice(0, 2)).toEqual(["bash", "-lc"]);
+    expect(command[2]).toContain(". ./.sandbox-agent-boxd/env");
+    expect(command[2]).toContain("--port 8080");
+    expect(command[2]).not.toContain("pkill");
   });
 });

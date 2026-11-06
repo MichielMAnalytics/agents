@@ -65,6 +65,10 @@
             {
               "title": "ComputeSDK",
               "href": "/sandbox-agent/docs/deploy/computesdk"
+            },
+            {
+              "title": "boxd",
+              "href": "/sandbox-agent/docs/deploy/boxd"
             }
           ]
         }

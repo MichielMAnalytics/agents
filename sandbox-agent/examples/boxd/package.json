@@ -1,0 +1,20 @@
+{
+  "name": "@sandbox-agent/example-boxd",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@boxd-sh/sdk": "latest",
+    "@sandbox-agent/example-shared": "workspace:*",
+    "sandbox-agent": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "^3.0.0"
+  }
+}

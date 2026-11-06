@@ -17,6 +17,7 @@ import { vercel } from "../src/providers/vercel.ts";
 import { modal } from "../src/providers/modal.ts";
 import { computesdk } from "../src/providers/computesdk.ts";
 import { sprites } from "../src/providers/sprites.ts";
+import { boxd } from "../src/providers/boxd.ts";
 import { prepareMockAgentDataHome } from "./helpers/mock-agent.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -299,6 +300,42 @@ function buildProviders(): ProviderEntry[] {
           env: collectApiKeys(),
           installAgents: ["claude"],
           serviceStartDuration: "10m",
+        });
+      },
+    });
+  }
+
+  // --- boxd ---
+  // BOXD_TEST_NAME_PREFIX and BOXD_TEST_LABELS ("key=value,key=value") let a
+  // shared org find and clean up test machines. Each machine also deletes
+  // itself after an hour.
+  {
+    let machineCount = 0;
+    entries.push({
+      name: "boxd",
+      skipReasons: [...missingEnvVars("BOXD_API_KEY"), ...missingModules("@boxd-sh/sdk")],
+      agent: "claude",
+      startTimeoutMs: 300_000,
+      canVerifyDestroyedSandbox: false,
+      sessionSkipReasons: missingEnvVars("ANTHROPIC_API_KEY"),
+      sessionCwd: "/home/boxd",
+      sessionTestsEnabled: true,
+      createProvider() {
+        const prefix = process.env.BOXD_TEST_NAME_PREFIX;
+        const labels = Object.fromEntries(
+          (process.env.BOXD_TEST_LABELS ?? "")
+            .split(",")
+            .filter(Boolean)
+            .map((pair) => pair.split("=", 2) as [string, string]),
+        );
+        return boxd({
+          create: () => ({
+            name: prefix ? `${prefix}-${Date.now().toString(36)}-${++machineCount}` : undefined,
+            labels,
+            deleteAfter: 3600,
+          }),
+          env: collectApiKeys(),
+          installAgents: ["claude"],
         });
       },
     });

@@ -1,0 +1,105 @@
+---
+title: "boxd"
+description: "Deploy Sandbox Agent inside a boxd machine."
+---
+
+[boxd](https://boxd.sh/?ref=rivet-agents) runs full Linux microVMs (KVM) with a persistent disk that start in about a second, and can be hibernated, snapshotted and forked.
+
+## Prerequisites
+
+- `BOXD_API_KEY` from the [boxd console](https://app.boxd.sh/?ref=rivet-agents)
+- `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+
+## TypeScript example
+
+```bash
+npm install sandbox-agent@0.5.x @boxd-sh/sdk
+```
+
+```typescript
+import { SandboxAgent } from "sandbox-agent";
+import { boxd } from "sandbox-agent/boxd";
+
+const env: Record<string, string> = {};
+if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+const sdk = await SandboxAgent.start({
+  sandbox: boxd({ env }),
+});
+
+try {
+  const session = await sdk.createSession({ agent: "claude" });
+  const response = await session.prompt([
+    { type: "text", text: "Summarize this repository" },
+  ]);
+  console.log(response.stopReason);
+} finally {
+  await sdk.destroySandbox();
+}
+```
+
+The `boxd` provider creates the machine, installs Sandbox Agent and the `claude` and `codex` agents, and starts the server. It returns the machine's HTTPS URL (`https://<name>.boxd.sh`).
+
+## Options
+
+```typescript
+boxd({
+  // Passed to boxd.machines.create(): name, image, fromSnapshot, labels, deleteAfter, config, ...
+  create: { name: "agent-1", labels: { team: "agents" }, deleteAfter: 3600 },
+  // Environment for the server and the agents it runs.
+  env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
+  // Agents installed while the machine is created. Pass [] to install them on first use.
+  installAgents: ["claude"],
+  agentPort: 3000,
+});
+```
+
+Pass `client` to reuse your own `Boxd` client, or `clientOptions` (for example `{ apiKey, region }`) to configure the one the provider creates.
+
+## Security
+
+The machine URL is public, so the server always runs with a bearer token. The provider generates a random token for each machine, stores it on the machine where only the machine user can read it, and reads it back when you reconnect. `sdk.inspectorUrl` includes the token. The environment you pass in `env` is stored the same way and is never put on a command line.
+
+boxd can show a browser check before a request reaches a machine. The SDK is not a browser, so the provider turns that check off for the machines it creates and relies on the token instead.
+
+## Pause and reconnect
+
+Hibernating a machine writes its memory to disk and stops it costing compute. Reconnecting with the same `sandboxId` wakes it, and the agent server is still running. If the server was stopped (for example after a reboot), the provider starts it again.
+
+`sdk.pauseSandbox()` closes open sessions after it hibernates the machine, and that last request wakes the machine again. To keep it hibernated, close the client first and pause through the provider:
+
+```typescript
+const provider = boxd({ env });
+const sdk = await SandboxAgent.start({ sandbox: provider });
+
+// ... run sessions ...
+
+const sandboxId = sdk.sandboxId!; // "boxd/<machine id>"
+await sdk.dispose();
+await provider.pause!(sandboxId.slice("boxd/".length));
+
+const resumed = await SandboxAgent.start({ sandbox: provider, sandboxId });
+```
+
+## Faster cold starts
+
+Set up one machine with Sandbox Agent and your agents installed, save it as a snapshot, and create new machines from it:
+
+```typescript
+import { Boxd } from "@boxd-sh/sdk";
+
+const client = new Boxd();
+const base = await SandboxAgent.start({ sandbox: boxd({ client }) });
+await client.snapshots.create(base.sandboxId!.slice("boxd/".length), "sandbox-agent-base");
+while ((await client.snapshots.get("sandbox-agent-base")).status !== "ready") {
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+}
+await base.destroySandbox();
+
+const sdk = await SandboxAgent.start({
+  sandbox: boxd({ client, create: { fromSnapshot: "sandbox-agent-base" }, env }),
+});
+```
+
+The provider skips the Sandbox Agent download when the machine already has the right version, and every machine still gets its own token.

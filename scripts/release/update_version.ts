@@ -31,6 +31,7 @@ const VERSION_REFERENCE_FILES = [
 	"sandbox-agent/docs/content/docs/deploy/boxlite.mdx",
 	"sandbox-agent/docs/content/docs/deploy/modal.mdx",
 	"sandbox-agent/docs/content/docs/deploy/computesdk.mdx",
+	"sandbox-agent/docs/content/docs/deploy/boxd.mdx",
 	"sandbox-agent/frontend/packages/website/src/components/GetStarted.tsx",
 	"sandbox-agent/.claude/commands/post-release-testing.md",
 	"sandbox-agent/examples/cloudflare/Dockerfile",
